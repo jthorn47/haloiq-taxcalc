@@ -1,11 +1,13 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, HTTPException
 from pydantic import BaseModel, Field
 from taxcalc import Policy, Records, Calculator
 import pandas as pd
+import os
+import httpx
 
 app = FastAPI(title="HaloIQ IRS Tax Calculator")
 
-# --- IRS (PSL) endpoint constants ---
+# ---- IRS (PSL) endpoint constants ----
 STATUS_MAP = {"single": 1, "married_joint": 2, "married_separate": 3, "head": 4}
 PERIODS = {"weekly": 52, "biweekly": 26, "semimonthly": 24, "monthly": 12, "annual": 1}
 
@@ -15,33 +17,28 @@ class Payload(BaseModel):
     pay_period: str
     tax_year: int = 2025
 
-# --- Health check route ---
+# ---- Health check route ----
 @app.get("/health")
 def health():
     return {"ok": True}
 
-# --- IRS (PSL) calculator endpoint ---
+# ---- IRS (PSL) calculator endpoint ----
 @app.post("/api/v1/calculate-taxes")
 def calculate_taxes(p: Payload):
     annual = p.gross_amount * PERIODS[p.pay_period]
-
     df = pd.DataFrame({
-        "e00200": [annual],                         # wages
-        "MARS": [STATUS_MAP[p.filing_status]],      # filing status
-        "XTOT": [1],                                # exemptions (placeholder)
+        "e00200": [annual],                          # wages
+        "MARS": [STATUS_MAP[p.filing_status]],       # filing status
+        "XTOT": [1],                                 # exemptions (placeholder)
     })
-
     rec = Records(data=df)
-    pol = Policy()
-    pol.set_year(p.tax_year)
-
+    pol = Policy(); pol.set_year(p.tax_year)
     calc = Calculator(policy=pol, records=rec)
     calc.calc_all()
 
     federal = float(calc.array("iitax")[0])
     ss = float(calc.array("payrolltax_ss")[0])
     medicare = float(calc.array("payrolltax_hi")[0])
-
     div = PERIODS[p.pay_period]
 
     return {
@@ -57,44 +54,71 @@ def calculate_taxes(p: Payload):
         }
     }
 
-# --- TaxUpdate-style shim endpoints ---
-# These mimic TaxUpdate API so your Edge Function can call them directly.
+# ---------------------------------------------------------------------------
+# TaxUpdate proxy + safe fallback (so HALO IQ can use TaxUpdate first)
+# ---------------------------------------------------------------------------
+
+TAX_PROVIDER = os.getenv("TAX_PROVIDER", "placeholder").lower()   # "taxupdate" or "placeholder"
+TAXUPDATE_BASE = os.getenv("TAXUPDATE_BASE", "").rstrip("/")      # e.g. https://api.taxupdate.com
+TAXUPDATE_KEY  = os.getenv("TAXUPDATE_KEY", "")                   # optional demo key
 
 @app.get("/api/tax/{code}")
-def shim_tax(
+async def taxupdate_or_fallback(
     code: str,
-    paydate: str = Query(...),          # YYYY-MM-DD (placeholder)
-    payperiods: int = Query(...),       # 52, 26, 24, 12, 1 (placeholder)
-    filingstatus: str = Query(...),     # single|married_joint|... (placeholder)
+    paydate: str = Query(...),
+    payperiods: int = Query(...),
+    filingstatus: str = Query(...),
     earnings: float = Query(...),
     exemptions: int = 0,
     stateexemptions: int = 0,
     zip: str | None = None,
 ):
-    code = code.upper()
+    """
+    Try real TaxUpdate API first; if unavailable, return placeholder math so UI still works.
+    """
+    # --- Try live TaxUpdate API if configured ---
+    if TAX_PROVIDER == "taxupdate" and TAXUPDATE_BASE:
+        try:
+            headers = {"Authorization": f"Bearer {TAXUPDATE_KEY}"} if TAXUPDATE_KEY else {}
+            params = {
+                "paydate": paydate,
+                "payperiods": payperiods,
+                "filingstatus": filingstatus,
+                "earnings": earnings,
+                "exemptions": exemptions,
+                "stateexemptions": stateexemptions,
+                "zip": zip,
+            }
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.get(f"{TAXUPDATE_BASE}/api/tax/{code}", params=params, headers=headers)
+            if r.status_code == 200:
+                return r.json()
+            else:
+                print(f"[TaxUpdate] {r.status_code} response; falling back.")
+        except Exception as e:
+            print("[TaxUpdate] error:", e)
 
-    # ----- PLACEHOLDER RATES (replace with real logic later) -----
-    if code in ("FIT", "FED", "FEDERAL"):
+    # --- Placeholder fallback (flat rates) ---
+    c = code.upper()
+    if c in ("FIT", "FED", "FEDERAL"):
         rate = 0.10
-    elif code in ("SOCIALSECURITY", "SS"):
+    elif c in ("SOCIALSECURITY", "SS"):
         rate = 0.062
-    elif code in ("MEDICARE", "MED"):
+    elif c in ("MEDICARE", "MED"):
         rate = 0.0145
     else:
-        # e.g., state codes like 'CA', 'NY' until state logic is wired
-        rate = 0.04
-    # -------------------------------------------------------------
+        rate = 0.04  # stand-in for state until wired
 
     tax = round(earnings * rate, 2)
     return {
         "ok": True,
-        "provider": "taxupdate",
-        "tax_type": code,
+        "provider": "taxupdate" if TAX_PROVIDER == "taxupdate" else "placeholder",
+        "tax_type": c,
         "inputs": {
             "paydate": paydate,
             "payperiods": payperiods,
             "filingstatus": filingstatus,
-            "earnings": round(earnings, 2),
+            "earnings": earnings,
             "exemptions": exemptions,
             "stateexemptions": stateexemptions,
             "zip": zip,
