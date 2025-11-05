@@ -1,19 +1,23 @@
-# Use a lightweight Python base image
 FROM python:3.10-slim
 
-# Set working directory
+# System deps (ssl/certs/locale sometimes needed by pandas/taxcalc)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
-# Copy requirements and install dependencies
+# Install deps first (better cache)
 COPY requirements.txt .
-RUN python3 -m pip install --upgrade pip setuptools wheel \
- && python3 -m pip install --no-cache-dir -r requirements.txt
+RUN python3 -m pip install --upgrade pip setuptools wheel && \
+    python3 -m pip install --no-cache-dir -r requirements.txt
 
-# Copy all app files
+# Copy app code
 COPY . .
 
-# Expose the Render port (Render assigns $PORT automatically)
-EXPOSE 8000
+# We’ll bind to 10000 explicitly (Render will detect it and rewire)
+ENV PORT=10000
+EXPOSE 10000
 
-# Run FastAPI app with uvicorn using the assigned PORT
-CMD ["sh", "-c", "exec python3 -m uvicorn app:app --host 0.0.0.0 --port ${PORT}"]
+# Start server (no shell tricks, no env substitution)
+CMD ["python3", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "10000"]
