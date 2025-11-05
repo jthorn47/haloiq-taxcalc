@@ -34,15 +34,13 @@ class Payload(BaseModel):
     pay_period: str
     tax_year: int = 2025
 
-
 # ---------------------------------------------------------
 # Root route (Render health check)
 # ---------------------------------------------------------
 @app.get("/")
 def root():
-    # Render pings this path to check if service is alive
+    # ✅ Render requires this endpoint for health
     return {"ok": True, "service": "haloiq-taxcalc"}
-
 
 # ---------------------------------------------------------
 # Explicit health check route
@@ -51,21 +49,17 @@ def root():
 def health():
     return {"ok": True}
 
-
 # ---------------------------------------------------------
 # IRS Federal Tax Calculation Endpoint
 # ---------------------------------------------------------
 @app.post("/api/v1/calculate-taxes")
 def calculate_taxes(p: Payload):
-    """
-    Compute estimated FIT withholding using PSL taxcalc library.
-    """
     try:
         annual = p.gross_amount * PERIODS[p.pay_period]
         df = pd.DataFrame({
-            "e00200": [annual],                            # wages
-            "MARS": [STATUS_MAP[p.filing_status]],         # filing status
-            "XTOT": [1],                                   # exemptions
+            "e00200": [annual],
+            "MARS": [STATUS_MAP[p.filing_status]],
+            "XTOT": [1],
         })
 
         rec = Records(data=df)
@@ -87,14 +81,11 @@ def calculate_taxes(p: Payload):
             "tax": per_period_tax,
             "net": net,
         }
-
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-
 # ---------------------------------------------------------
-# Quick alternate test endpoint (GET)
-# Example: /api/tax/FIT?paydate=2025-01-15&payperiods=52&filingstatus=single&earnings=1920
+# Quick browser test endpoint
 # ---------------------------------------------------------
 @app.get("/api/tax/{tax_type}")
 def quick_tax(
@@ -104,9 +95,6 @@ def quick_tax(
     filingstatus: str = Query(...),
     earnings: float = Query(...),
 ):
-    """
-    Simple test endpoint for browser or GET calls.
-    """
     try:
         tax = round(earnings * 0.10, 2)
         net = round(earnings - tax, 2)
