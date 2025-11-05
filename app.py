@@ -5,7 +5,7 @@ import pandas as pd
 
 app = FastAPI(title="HaloIQ IRS Tax Calculator")
 
-# ---- IRS (PSL) endpoint constants ----
+# --- IRS (PSL) endpoint constants ---
 STATUS_MAP = {"single": 1, "married_joint": 2, "married_separate": 3, "head": 4}
 PERIODS = {"weekly": 52, "biweekly": 26, "semimonthly": 24, "monthly": 12, "annual": 1}
 
@@ -15,29 +15,33 @@ class Payload(BaseModel):
     pay_period: str
     tax_year: int = 2025
 
-# ---- Health (single route) ----
+# --- Health check route ---
 @app.get("/health")
 def health():
     return {"ok": True}
 
-# ---- IRS (PSL) calculator you already had ----
+# --- IRS (PSL) calculator endpoint ---
 @app.post("/api/v1/calculate-taxes")
 def calculate_taxes(p: Payload):
     annual = p.gross_amount * PERIODS[p.pay_period]
+
     df = pd.DataFrame({
-        "e00200": [annual],                          # wages
-        "MARS": [STATUS_MAP[p.filing_status]],       # filing status
-        "XTOT": [1]                                  # exemptions (placeholder)
+        "e00200": [annual],                         # wages
+        "MARS": [STATUS_MAP[p.filing_status]],      # filing status
+        "XTOT": [1],                                # exemptions (placeholder)
     })
+
     rec = Records(data=df)
     pol = Policy()
     pol.set_year(p.tax_year)
+
     calc = Calculator(policy=pol, records=rec)
     calc.calc_all()
 
     federal = float(calc.array("iitax")[0])
     ss = float(calc.array("payrolltax_ss")[0])
     medicare = float(calc.array("payrolltax_hi")[0])
+
     div = PERIODS[p.pay_period]
 
     return {
@@ -53,14 +57,15 @@ def calculate_taxes(p: Payload):
         }
     }
 
-# ---- TaxUpdate-style shim (placeholder) ----
-# Your Edge Function will call this first. Replace rates later with real logic.
+# --- TaxUpdate-style shim endpoints ---
+# These mimic TaxUpdate API so your Edge Function can call them directly.
+
 @app.get("/api/tax/{code}")
 def shim_tax(
     code: str,
-    paydate: str = Query(...),        # YYYY-MM-DD (not used in placeholder)
-    payperiods: int = Query(...),     # 52, 26, 24, etc. (not used in placeholder)
-    filingstatus: str = Query(...),   # single|married_joint|... (not used in placeholder)
+    paydate: str = Query(...),          # YYYY-MM-DD (placeholder)
+    payperiods: int = Query(...),       # 52, 26, 24, 12, 1 (placeholder)
+    filingstatus: str = Query(...),     # single|married_joint|... (placeholder)
     earnings: float = Query(...),
     exemptions: int = 0,
     stateexemptions: int = 0,
@@ -68,7 +73,7 @@ def shim_tax(
 ):
     code = code.upper()
 
-    # ----- PLACEHOLDER RATES (swap this with real PSL/WH32/state logic) -----
+    # ----- PLACEHOLDER RATES (replace with real logic later) -----
     if code in ("FIT", "FED", "FEDERAL"):
         rate = 0.10
     elif code in ("SOCIALSECURITY", "SS"):
@@ -76,20 +81,20 @@ def shim_tax(
     elif code in ("MEDICARE", "MED"):
         rate = 0.0145
     else:
-        # e.g., 'CA', 'NY' until you wire real state logic
+        # e.g., state codes like 'CA', 'NY' until state logic is wired
         rate = 0.04
-    # ------------------------------------------------------------------------
+    # -------------------------------------------------------------
 
     tax = round(earnings * rate, 2)
     return {
         "ok": True,
-        "provider": "taxupdate",  # UI shows "Verified by TaxUpdate"
+        "provider": "taxupdate",
         "tax_type": code,
         "inputs": {
             "paydate": paydate,
             "payperiods": payperiods,
             "filingstatus": filingstatus,
-            "earnings": earnings,
+            "earnings": round(earnings, 2),
             "exemptions": exemptions,
             "stateexemptions": stateexemptions,
             "zip": zip,
